@@ -40,8 +40,8 @@
  class SpoolLink:
      def __init__(self, config: ConfigHelper) -> None:
          self.server = config.get_server()
-@@ -68,6 +101,7 @@
-         self._active_spool_id: Optional[int] = None
+@@ -103,6 +136,7 @@
+         self._startup_restore_task: Optional["asyncio.Future"] = None
  
          self.server.register_remote_method(RESOLVE_METHOD, self._resolve_spool)
 +        self.server.register_remote_method("spoollink_save_pa", self._handle_remote_save_pa)
