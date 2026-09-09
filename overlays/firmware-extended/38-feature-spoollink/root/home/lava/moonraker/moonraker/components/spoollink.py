@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 RESOLVE_METHOD = "spoollink_resolve_spool"
 SET_ENDPOINT = "spoollink/set"
 RFID_REFRESH_WINDOW = 5.0
+ASSIGNMENTS_CACHE_FILE = "assignments.json"
 # Do not include terminal or unknown feeder states in empty-UID recovery.
 EMPTY_UID_RECOVERY_LOAD_STATES = {"load_heating"}
 
@@ -98,6 +99,8 @@ class SpoolLink:
         self._ptc_types: List[str] = []
         self._ptc_spool_ids: List[int] = []
         self._active_spool_id: Optional[int] = None
+        self._lane_assignments = self._load_lane_assignments()
+        self._startup_restore_task: Optional["asyncio.Future"] = None
 
         self.server.register_remote_method(RESOLVE_METHOD, self._resolve_spool)
         self.server.register_event_handler(
@@ -138,6 +141,8 @@ class SpoolLink:
                 "filament_detected", "enabled"],
         }, self._handle_status_update, {})
         self._handle_status_update(status, 0.)
+        self._startup_restore_task = self._fire(
+            self._restore_lane_assignments())
 
     def _handle_klippy_disconnect(self) -> None:
         logging.info("[spoollink] Klippy disconnected")
@@ -145,6 +150,9 @@ class SpoolLink:
             task.cancel()
         for task in self._retention_tasks.values():
             task.cancel()
+        if self._startup_restore_task is not None:
+            self._startup_restore_task.cancel()
+            self._startup_restore_task = None
         self._channel_uids = {}
         self._channel_event_times = {}
         self._channel_signatures = {}
@@ -241,6 +249,8 @@ class SpoolLink:
                             "Spoolman spool #%s", ch, new_id)
                         self._fire(self._resolve_spool(ch, spool_id=new_id))
                     if old_id > 0 and new_id == 0:
+                        if eventtime > 0.:
+                            self._forget_lane_assignment(ch, old_id)
                         self._start_same_uid_recovery(
                             ch, old_id, eventtime,
                             combined_clear_spool_ids.get(ch) == old_id
@@ -893,6 +903,71 @@ class SpoolLink:
 
     # -- Local cache --------------------------------------------------------
 
+    def _lane_assignments_path(self) -> Optional[str]:
+        if not self._cache_dir:
+            return None
+        return os.path.join(self._cache_dir, ASSIGNMENTS_CACHE_FILE)
+
+    def _load_lane_assignments(self) -> Dict[int, int]:
+        path = self._lane_assignments_path()
+        if not path:
+            return {}
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                raise ValueError("assignment cache is not an object")
+            assignments = {
+                int(channel): int(spool_id)
+                for channel, spool_id in raw.items()
+                if int(channel) in range(4) and int(spool_id) > 0}
+            logging.info("[spoollink] restored saved lane assignments: %s",
+                         assignments or "none")
+            return assignments
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            logging.warning("[spoollink] assignment cache read failed: %s", e)
+            return {}
+
+    def _save_lane_assignments(self) -> None:
+        path = self._lane_assignments_path()
+        if not path:
+            return
+        try:
+            os.makedirs(self._cache_dir, exist_ok=True)
+            with open(path, "w") as f:
+                json.dump({str(ch): spool_id
+                           for ch, spool_id in self._lane_assignments.items()}, f)
+        except Exception as e:
+            logging.warning("[spoollink] assignment cache write failed: %s", e)
+
+    def _remember_lane_assignment(self, channel: int, spool_id: int) -> None:
+        if channel not in range(4) or spool_id <= 0:
+            return
+        if self._lane_assignments.get(channel) != spool_id:
+            self._lane_assignments[channel] = spool_id
+            self._save_lane_assignments()
+
+    def _forget_lane_assignment(self, channel: int, spool_id: int) -> None:
+        if self._lane_assignments.get(channel) == spool_id:
+            self._lane_assignments.pop(channel, None)
+            self._save_lane_assignments()
+
+    async def _restore_lane_assignments(self) -> None:
+        # Let the RFID readers report first.  This cache fills the startup gap
+        # only for lanes whose persisted association has not already resolved.
+        await asyncio.sleep(2.0)
+        for channel, spool_id in list(self._lane_assignments.items()):
+            known = self._known_spools.get(channel)
+            known_id = (known[1].get("id", 0)
+                        if known is not None else 0) or 0
+            if known_id == spool_id:
+                continue
+            logging.info("[spoollink] ch%d: restoring saved Spoolman spool #%s",
+                         channel, spool_id)
+            await self._resolve_spool(channel, spool_id=spool_id)
+
     def _cache_path(self, card_uid: str) -> Optional[str]:
         if not self._cache_dir:
             return None
@@ -1181,6 +1256,7 @@ class SpoolLink:
         reply = await self._spoollink_set(channel, message, info=info)
         if reply is not None:
             logging.info("[spoollink] ch%d: spool %s applied", channel, spool_id)
+            self._remember_lane_assignment(channel, spool_id)
             if uid_hex:
                 self._resolved_uids[channel] = uid_hex
                 self._known_spools[channel] = (uid_hex, spool)
