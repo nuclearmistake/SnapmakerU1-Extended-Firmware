@@ -8,11 +8,18 @@
      'extruder_map_table': [i for i in range(PHYSICAL_EXTRUDER_NUM)] + [0] * (LOGICAL_EXTRUDER_NUM - PHYSICAL_EXTRUDER_NUM),
      'extruders_used' : [False] * PHYSICAL_EXTRUDER_NUM,
      'extruders_replenished': [i for i in range(PHYSICAL_EXTRUDER_NUM)],
-@@ -181,6 +182,7 @@
+@@ -181,6 +182,14 @@
 
              tmp_print_task_config['filament_official'][channel] = info['OFFICIAL']
              tmp_print_task_config['filament_sku'][channel] = info['SKU']
-+            tmp_print_task_config['filament_spool_id'][channel] = info.get('SPOOL_ID', 0)
++            # A tag-less reader update does not own the Spoolman association.
++            # Keep a manually assigned spool through reader initialization and
++            # refreshes with no card; a real card scan (or SpoolLink, which
++            # explicitly supplies SPOOL_ID) remains authoritative.
++            if 'SPOOL_ID' in info:
++                tmp_print_task_config['filament_spool_id'][channel] = info['SPOOL_ID']
++            elif any(info.get('CARD_UID') or []):
++                tmp_print_task_config['filament_spool_id'][channel] = 0
              if self.filament_param_obj is not None:
                  tmp_print_task_config['filament_soft'][channel] = \
                      self.filament_param_obj.get_is_soft(info['VENDOR'], info['MAIN_TYPE'], info['SUB_TYPE'])

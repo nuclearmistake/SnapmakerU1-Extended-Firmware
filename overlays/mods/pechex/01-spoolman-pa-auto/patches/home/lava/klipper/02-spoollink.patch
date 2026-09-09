@@ -1,6 +1,6 @@
 --- a/klippy/extras/spoollink.py
 +++ b/klippy/extras/spoollink.py
-@@ -5,13 +5,220 @@
+@@ -5,13 +5,237 @@
  import logging
  
  from . import filament_protocol
@@ -180,16 +180,17 @@
 +                if flow_cal:
 +                    logging.info("[spoollink] ch%d (%s): starting auto FLOW_CALIBRATE for Spool #%s (attempt %d)", target_channel, extruder_name, target_spool_id, self.calibration_attempts[target_channel])
 +                    self.gcode.respond_raw(f"// [spoollink] ch{target_channel} (Spool #{target_spool_id}): Starting automatic Pressure Advance calibration...")
-+                    self._trigger_flow_calibrate(target_channel, extruder_name)
++                    self._trigger_flow_calibrate(target_channel)
 +                else:
 +                    logging.warning("[spoollink] flow_calibrator component not found, cannot run auto PA calibration")
 +        except Exception as e:
 +            logging.error("[spoollink] error in _check_and_run_auto_pa: %s", e, exc_info=True)
 +        return self.printer.get_reactor().NEVER
 +
-+    def _trigger_flow_calibrate(self, target_channel, extruder_name):
++    def _trigger_flow_calibrate(self, target_channel):
 +        # Re-verify machine state immediately before executing gcode (guard against
 +        # race condition between the earlier IDLE check and the actual command dispatch).
++        extruder_name = "extruder" if target_channel == 0 else f"extruder{target_channel}"
 +        msm = self.printer.lookup_object('machine_state_manager', None)
 +        if msm:
 +            m_sta = str(msm.get_status().get('main_state', '')).upper()
@@ -205,15 +206,31 @@
 +        self._calibration_running = True
 +        try:
 +            toolhead = self.printer.lookup_object('toolhead', None)
-+            if toolhead:
-+                active_ext = toolhead.get_extruder()
-+                if active_ext and active_ext.extruder_index != target_channel:
-+                    logging.info("[spoollink] active toolhead is extruder%d, switching to T%d before calibration", active_ext.extruder_index, target_channel)
-+                    self.gcode.respond_raw(f"// [spoollink] Switching active toolhead to T{target_channel} for calibration...")
-+                    self.gcode.run_script_from_command(f"T{target_channel}")
++            target_extruder = self.printer.lookup_object(extruder_name, None)
++            if toolhead is None or target_extruder is None:
++                raise RuntimeError("target extruder is not available")
 +
-+            logging.info("[spoollink] executing FLOW_CALIBRATE EXTRUDER=%s", extruder_name)
-+            self.gcode.run_script_from_command(f"FLOW_CALIBRATE EXTRUDER={extruder_name}")
++            # FLOW_CALIBRATE ignores EXTRUDER= and always uses the mounted
++            # toolhead extruder.  At startup its logical selection can already
++            # match this channel while every physical head remains PARKED.
++            activation = target_extruder.get_extruder_activate_status()
++            active_info = activation[0] if activation else (None, None)
++            active_ext = toolhead.get_extruder()
++            if (not active_ext or active_ext.extruder_index != target_channel
++                    or active_info[0] != extruder_name or active_info[1] != 0):
++                logging.info("[spoollink] selecting T%d before calibration (activation=%s)", target_channel, activation)
++                self.gcode.respond_raw(f"// [spoollink] Selecting T{target_channel} for calibration...")
++                self.gcode.run_script_from_command(f"T{target_channel}")
++                activation = target_extruder.get_extruder_activate_status()
++                active_info = activation[0] if activation else (None, None)
++                active_ext = toolhead.get_extruder()
++                if (not active_ext or active_ext.extruder_index != target_channel
++                        or active_info[0] != extruder_name or active_info[1] != 0):
++                    raise RuntimeError(
++                        f"T{target_channel} did not activate {extruder_name}: {activation}")
++
++            logging.info("[spoollink] executing FLOW_CALIBRATE on %s", extruder_name)
++            self.gcode.run_script_from_command("FLOW_CALIBRATE")
 +        except Exception as e:
 +            logging.error("[spoollink] FLOW_CALIBRATE execution error: %s", e, exc_info=True)
 +        finally:
