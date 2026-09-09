@@ -229,6 +229,17 @@ class SpoolLink:
                     old_id = (self._ptc_spool_ids[ch]
                               if ch < len(self._ptc_spool_ids) else 0) or 0
                     new_id = (new_ids[ch] if ch < len(new_ids) else 0) or 0
+                    # Klipper persists an explicitly assigned Spoolman ID, but
+                    # there is no RFID event to reapply a cardless spool after
+                    # restart.  Restore only from the initial snapshot and only
+                    # when no card is currently present; normal assignments and
+                    # later clears remain user/RFID controlled.
+                    if (eventtime == 0. and old_id == 0 and new_id > 0
+                            and not self._channel_uids.get(ch, "")):
+                        logging.info(
+                            "[spoollink] ch%d: restoring tagless startup "
+                            "Spoolman spool #%s", ch, new_id)
+                        self._fire(self._resolve_spool(ch, spool_id=new_id))
                     if old_id > 0 and new_id == 0:
                         self._start_same_uid_recovery(
                             ch, old_id, eventtime,
