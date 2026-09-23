@@ -94,6 +94,9 @@ class FakeConfig:
         value = self.options.get(key)
         return default if value is None else value
 
+    def getboolean(self, key, default=False):
+        return self.options.get(key, default)
+
     def getintlist(self, key, default=None, separator="\n"):
         value = self.options.get(key)
         if value is None:
